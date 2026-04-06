@@ -13,8 +13,8 @@ Official implementation of "Self-Correcting SAM: Robust Medical Image Segmentati
 
 ## Installation
 ```bash
-git clone https://github.com/yourusername/GR3-SAM.git
-cd GR3-SAM
+git clone https://github.com/imran980/Gated-SAM.git
+cd Gated-SAM
 pip install -r requirements.txt
 ```
 
@@ -28,9 +28,9 @@ mask, confidence = predictor.predict(image, noisy_box)
 
 ## Citation
 ```bibtex
-@inproceedings{yourname2026gr3sam,
+@inproceedings{imran2026gatedsam,
   title={Self-Correcting SAM: Robust Medical Image Segmentation via Gated Recursive Refinement},
-  author={Your Name},
+  author={Muhammad Imran},
   booktitle={MICCAI},
   year={2026}
 }
