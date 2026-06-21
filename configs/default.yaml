@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Default configuration for the gated_sam experiments.
+# Override on the CLI with --set key=value, or copy to configs/local.yaml.
+# Paths are resolved relative to `data_root` / `checkpoint_root` unless absolute.
+# ─────────────────────────────────────────────────────────────────────────
+
+device: cuda                # cuda | cpu
+seed: 42
+img_size: 256
+out_dir: outputs            # all tables / figures / trajectories land here
+
+# ── Models ───────────────────────────────────────────────────────────────
+# The paper's stated protocol uses ViT-B for a fair comparison with MedSAM
+# (which is ViT-B). Use vit_b for both unless you deliberately want vit_h.
+checkpoint_root: checkpoints
+sam:
+  model_type: vit_b
+  checkpoint: sam_vit_b_01ec64.pth
+medsam:
+  model_type: vit_b
+  checkpoint: medsam_vit_b.pth
+
+# ── Datasets ─────────────────────────────────────────────────────────────
+data_root: data
+n_images_per_dataset: 60    # raise for final runs; lower for quick smoke tests
+datasets:
+  JSRT:
+    loader: jsrt
+    img_dir: jsrt/jpg
+    mask_dir: jsrt/masks
+    modality: xray
+  BUSI:
+    loader: busi
+    root: Dataset_BUSI_with_GT
+    modality: ultrasound
+  Kvasir:
+    loader: kvasir
+    root: Kvasir-SEG
+    modality: endoscopy
+  PROMISE12:
+    loader: promise12
+    root: promise12
+    modality: mri
+    max_slices_per_volume: 5
+
+# ── Prompt perturbation ──────────────────────────────────────────────────
+noise_levels: [0, 10, 20, 30]   # delta in pixels (max coordinate displacement)
+seeds: [0, 1, 2, 3, 4]          # >=5 for CIs / Wilcoxon
+
+# ── Reference-free objective ─────────────────────────────────────────────
+objective:
+  name: perturbation_consistency   # predicted_iou | coarse_agreement | perturbation_consistency | combo
+  consistency_K: 6                 # number of jittered boxes
+  consistency_jitter: 8            # px jitter for consistency probes
+  combo_weights: {predicted_iou: 0.34, coarse_agreement: 0.33, perturbation_consistency: 0.33}
+
+# ── Prompt-space search (the optimizer) ──────────────────────────────────
+search:
+  max_steps: 3
+  box_pad: 10            # padding when converting a mask to a tight box
+  dilate_px: [8, 16]     # box-expansion candidates
+  erode_px: [8, 16]      # box-shrink candidates
+  n_jitter_candidates: 4 # jittered boxes added to the candidate neighborhood
+  jitter_px: 8
+  use_mask_hint: true    # feed previous low-res logits as a dense prompt
+  guard: true            # guarded return: best-Q mask over the whole trajectory
+  improve_eps: 0.005     # stop when Q gain < eps

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gated-sam"
+version = "0.2.0"
+description = "Consistency-driven prompt-space optimization for robust medical segmentation with SAM (WACV 2027 reframe of Gated Recursive Refinement)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "tqdm>=4.65.0",
+    "pillow>=9.5.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+full = ["torch>=2.0.0", "torchvision>=0.15.0", "SimpleITK>=2.3.0"]
+test = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+gated-sam-day1      = "gated_sam.experiments.day1_correlation:main"
+gated-sam-main      = "gated_sam.experiments.main_table:main"
+gated-sam-lockin    = "gated_sam.experiments.lockin:main"
+gated-sam-ablations = "gated_sam.experiments.ablations:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
