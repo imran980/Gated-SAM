@@ -142,6 +142,11 @@ LOADERS = {"jsrt": load_jsrt, "busi": load_busi, "kvasir": load_kvasir, "promise
 
 def load_dataset(name: str, cfg) -> list[Sample]:
     spec = cfg.datasets[name]
+    primary = resolve(cfg.data_root, spec.get("root") or spec.get("img_dir"))
+    if not primary.exists():
+        print(f"  [{name}] WARNING: path not found: {primary.resolve()} "
+              f"-> 0 samples (check data_root and folder name)")
+        return []
     loader = LOADERS[spec["loader"]]
     samples = loader(spec, cfg.data_root, int(cfg.img_size), int(cfg.n_images_per_dataset))
     print(f"  [{name}] loaded {len(samples)} samples")

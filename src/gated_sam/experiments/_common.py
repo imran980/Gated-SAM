@@ -29,14 +29,32 @@ def dataset_names(cfg, args):
     return list(args.datasets) if args.datasets else list(cfg.datasets)
 
 
+def _require_file(path, what, hint):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{what} not found at: {path.resolve()}\n"
+            f"  hint: {hint}")
+    return path
+
+
 def build_sam(cfg):
     from ..models import load_sam
-    return load_sam(cfg.sam.model_type, resolve(cfg.checkpoint_root, cfg.sam.checkpoint), cfg.device)
+    ckpt = _require_file(
+        resolve(cfg.checkpoint_root, cfg.sam.checkpoint),
+        f"SAM checkpoint (model_type={cfg.sam.model_type})",
+        "fix checkpoint_root / sam.checkpoint, e.g. "
+        "--set checkpoint_root=/abs/path sam.checkpoint=sam_vit_h_4b8939.pth sam.model_type=vit_h")
+    return load_sam(cfg.sam.model_type, ckpt, cfg.device)
 
 
 def build_medsam(cfg):
     from ..models import load_medsam
-    return load_medsam(cfg.medsam.model_type, resolve(cfg.checkpoint_root, cfg.medsam.checkpoint), cfg.device)
+    ckpt = _require_file(
+        resolve(cfg.checkpoint_root, cfg.medsam.checkpoint),
+        f"MedSAM checkpoint (model_type={cfg.medsam.model_type})",
+        "fix checkpoint_root / medsam.checkpoint, or omit MedSAM")
+    return load_medsam(cfg.medsam.model_type, ckpt, cfg.device)
 
 
 def out_dir(cfg, sub: str) -> Path:

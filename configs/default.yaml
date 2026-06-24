@@ -12,7 +12,9 @@ out_dir: outputs            # all tables / figures / trajectories land here
 # ── Models ───────────────────────────────────────────────────────────────
 # The paper's stated protocol uses ViT-B for a fair comparison with MedSAM
 # (which is ViT-B). Use vit_b for both unless you deliberately want vit_h.
-checkpoint_root: checkpoints
+# NOTE: checkpoints live alongside the datasets under mi3dr/dataset on the A100.
+# If you launch from elsewhere, make this an ABSOLUTE path (realpath mi3dr/dataset).
+checkpoint_root: mi3dr/dataset
 sam:
   model_type: vit_b
   checkpoint: sam_vit_b_01ec64.pth
@@ -21,7 +23,10 @@ medsam:
   checkpoint: medsam_vit_b.pth
 
 # ── Datasets ─────────────────────────────────────────────────────────────
-data_root: data
+# Four dataset folders live directly under this root: Dataset_BUSI_with_GT,
+# jsrt, Kvasir-SEG, promise12. Use an ABSOLUTE path if not launching from
+# the directory that contains mi3dr/.
+data_root: mi3dr/dataset
 n_images_per_dataset: 60    # raise for final runs; lower for quick smoke tests
 datasets:
   JSRT:
