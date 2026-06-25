@@ -84,11 +84,24 @@ def consistency_gate(predictor, image, init_box, rng, cfg):
 
     obj = build_objective(cfg)
     q0 = obj(predictor, p0, rng)
+    anchor = float(cfg.search.get("gate_anchor", 0.30))
+    refine_ok = (iou(p1.mask, p0.mask) >= anchor) and _plausible(p1.mask)
+    mode = cfg.search.get("gate_mode", "clean_veto")
+
+    if mode == "clean_veto":
+        # Refine by default (one-pass refinement is strong under noise); keep vanilla
+        # ONLY when the initial prediction is already highly stable (clean prompt). This
+        # is the only configuration that can match ungated at high noise AND avoid its
+        # clean-prompt regression.
+        tau = float(cfg.search.get("gate_clean_tau", 0.85))
+        if q0 >= tau:
+            return p0.mask
+        return p1.mask if refine_ok else p0.mask
+
+    # mode == "improve": switch to the refinement only if it raises the objective.
     q1 = obj(predictor, p1, rng)
     margin = float(cfg.search.get("gate_margin", 0.03))
-    anchor = float(cfg.search.get("gate_anchor", 0.30))
-    accept = (q1 > q0 + margin) and (iou(p1.mask, p0.mask) >= anchor) and _plausible(p1.mask)
-    return p1.mask if accept else p0.mask
+    return p1.mask if (q1 > q0 + margin and refine_ok) else p0.mask
 
 
 def ours_search(predictor, image, init_box, rng, cfg):

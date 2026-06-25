@@ -71,5 +71,8 @@ search:
   guard: true            # guarded return: best-Q mask over the whole trajectory
   improve_eps: 0.005     # stop when Q gain < eps
   # --- consistency GATE (the main `ours`): vanilla vs one anchored refinement ---
-  gate_margin: 0.03      # refine only if the objective improves by > this margin
+  gate_mode: clean_veto  # clean_veto = refine by default, keep vanilla only if clean;
+                         # improve = keep vanilla unless refinement raises the objective
+  gate_clean_tau: 0.85   # clean_veto: keep vanilla when initial consistency >= tau
+  gate_margin: 0.03      # improve mode: refine only if objective improves by > margin
   gate_anchor: 0.30      # refined mask must overlap the vanilla mask by >= this IoU
