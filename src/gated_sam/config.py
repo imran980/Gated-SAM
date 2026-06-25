@@ -51,6 +51,11 @@ def _coerce(value: str) -> Any:
     try:
         return ast.literal_eval(value)
     except (ValueError, SyntaxError):
+        # bare-word list like [JSRT] or [JSRT,BUSI] (unquoted names literal_eval rejects)
+        s = value.strip()
+        if len(s) >= 2 and s[0] == "[" and s[-1] == "]":
+            inner = s[1:-1].strip()
+            return [] if not inner else [_coerce(x.strip()) for x in inner.split(",")]
         return value
 
 

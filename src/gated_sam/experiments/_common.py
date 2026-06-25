@@ -18,6 +18,10 @@ def base_parser(description: str) -> argparse.ArgumentParser:
 
 def get_config(args):
     cfg = load_config(args.config, args.overrides)
+    if not isinstance(cfg.get("datasets"), dict):
+        raise SystemExit(
+            "`datasets` must stay a name->spec mapping. To run a subset of datasets use "
+            "the --datasets flag (e.g. --datasets JSRT BUSI), NOT --set datasets=...")
     if args.datasets:
         missing = [d for d in args.datasets if d not in cfg.datasets]
         if missing:

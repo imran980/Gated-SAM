@@ -18,6 +18,22 @@ def test_coerce_lists():
     assert _coerce("[0,10,20,30]") == [0, 10, 20, 30]
 
 
+def test_coerce_bareword_lists():
+    assert _coerce("[JSRT]") == ["JSRT"]
+    assert _coerce("[JSRT,BUSI]") == ["JSRT", "BUSI"]
+
+
+def test_get_config_rejects_datasets_override():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from gated_sam.experiments._common import get_config
+    args = SimpleNamespace(config=None, overrides=["datasets=[JSRT]"], datasets=None)
+    with pytest.raises(SystemExit):
+        get_config(args)
+
+
 def test_override_list_lands_as_list():
     cfg = load_config(None, ["seeds=[0,1,2]", "noise_levels=[0,30]"])
     assert cfg["seeds"] == [0, 1, 2]
