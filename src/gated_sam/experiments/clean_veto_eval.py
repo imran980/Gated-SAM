@@ -27,6 +27,7 @@ Anchor-ok = mask_iou>=miou_min AND area_ratio in [lo,hi] AND center_shift<=cente
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -292,6 +293,9 @@ def run_analyze(cfg, args):
     tau = select_threshold(sweep)
     test = df[df.split == "test"].reset_index(drop=True)
     refine_test = decide(test, args.signal, tau, anchors_default)
+    # persist the val-selected decision so `qualitative` can reuse it without --tau
+    (out / f"selected_{args.signal}.json").write_text(
+        json.dumps({"signal": args.signal, "threshold": tau, "anchors": list(anchors_default)}))
 
     tables = {
         "tau_sweep": sweep,
@@ -339,8 +343,19 @@ def run_qualitative(cfg, args):
 
     out = _common.out_dir(cfg, "clean_veto")
     df = assign_split(pd.read_csv(_records_path(cfg))).reset_index(drop=True)
-    anchors = (MIOU_GRID[0], *AREA_GRID[0], 0.2 * int(cfg.img_size))
-    df["refine"] = decide(df, args.signal, args.tau, anchors)
+    # Use the val-selected threshold written by `analyze` unless --tau is given explicitly.
+    sel_path = out / f"selected_{args.signal}.json"
+    default_anchors = (MIOU_GRID[0], *AREA_GRID[0], 0.2 * int(cfg.img_size))
+    if args.tau is not None:
+        tau, anchors = args.tau, default_anchors
+    elif sel_path.exists():
+        sel = json.loads(sel_path.read_text())
+        tau, anchors = sel["threshold"], tuple(sel["anchors"])
+    else:
+        tau, anchors = 0.90, default_anchors
+    print(f"[qual] signal={args.signal} tau={tau} (from "
+          f"{'--tau' if args.tau is not None else sel_path.name if sel_path.exists() else 'default'})")
+    df["refine"] = decide(df, args.signal, tau, anchors)
     df["oracle_refine"] = df.dice_refined > df.dice_vanilla
 
     picks = {
@@ -390,7 +405,8 @@ def main(argv=None):
     p = _common.base_parser(__doc__)
     p.add_argument("--stage", choices=["cache", "analyze", "qualitative"], required=True)
     p.add_argument("--signal", choices=["A", "B", "C", "D"], default="A")
-    p.add_argument("--tau", type=float, default=0.90, help="qualitative: threshold for the decision")
+    p.add_argument("--tau", type=float, default=None,
+                   help="qualitative: override the decision threshold (default: reuse analyze's selected tau)")
     p.add_argument("--skip-search", action="store_true", help="cache: skip the slow free-search column")
     args = p.parse_args(argv)
     cfg = _common.get_config(args)
