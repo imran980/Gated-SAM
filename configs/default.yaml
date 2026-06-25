@@ -70,3 +70,6 @@ search:
   use_mask_hint: true    # feed previous low-res logits as a dense prompt
   guard: true            # guarded return: best-Q mask over the whole trajectory
   improve_eps: 0.005     # stop when Q gain < eps
+  # --- consistency GATE (the main `ours`): vanilla vs one anchored refinement ---
+  gate_margin: 0.03      # refine only if the objective improves by > this margin
+  gate_anchor: 0.30      # refined mask must overlap the vanilla mask by >= this IoU

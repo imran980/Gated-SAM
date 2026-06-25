@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from .metrics import mask_to_box
+from .metrics import iou, mask_to_box
 from .models import Predictor
 from .objectives import build_objective
 from .prompts import clip_box
 from .refine import refine_search
+
+
+def _plausible(mask: np.ndarray, lo: float = 0.002, hi: float = 0.95) -> bool:
+    """Reject degenerate masks (near-empty slivers or whole-image blobs)."""
+    r = mask.sum() / mask.size
+    return lo <= r <= hi
 
 
 def _one_pass_T(predictor: Predictor, image: np.ndarray, init_box: np.ndarray, cfg):
@@ -53,17 +59,51 @@ def predicted_iou_gate(predictor, image, init_box, rng, cfg):
     return (p2 if p2.score > p1.score else p1).mask
 
 
-def ours(predictor, image, init_box, rng, cfg):
-    """Consistency-driven prompt-space search with guarded return."""
-    objective = build_objective(cfg)
-    return refine_search(predictor, image, init_box, objective, cfg, rng).mask
+def consistency_gate(predictor, image, init_box, rng, cfg):
+    """Ours: a guarded, anchored reference-free GATE between vanilla and one refinement.
 
+    Refine once (the strong ungated move), then accept the refined mask ONLY IF the
+    reference-free objective improves by a margin AND the refined mask stays on the same
+    object (overlap with the vanilla mask) AND is non-degenerate. Otherwise keep vanilla.
+
+    This restores the no-regression property the free search lost: the candidate set is
+    just {vanilla, one anchored refinement}, both tied to the prompted object, so the
+    objective cannot be gamed by a far-away stable blob. A clean prompt is already stable
+    (margin not cleared -> keep vanilla); a noisy prompt's refinement is more stable
+    (margin cleared -> refine).
+    """
+    predictor.set_image(image)
+    h, w = image.shape[:2]
+    box = clip_box(np.asarray(init_box), h, w)
+    p0 = predictor.predict_best(box)
+    tight = mask_to_box(p0.mask, pad=int(cfg.search.box_pad), shape=(h, w))
+    if tight is None or not _plausible(p0.mask):
+        return p0.mask
+    hint = p0.logits if bool(cfg.search.use_mask_hint) else None
+    p1 = predictor.predict_best(tight, mask_input=hint)
+
+    obj = build_objective(cfg)
+    q0 = obj(predictor, p0, rng)
+    q1 = obj(predictor, p1, rng)
+    margin = float(cfg.search.get("gate_margin", 0.03))
+    anchor = float(cfg.search.get("gate_anchor", 0.30))
+    accept = (q1 > q0 + margin) and (iou(p1.mask, p0.mask) >= anchor) and _plausible(p1.mask)
+    return p1.mask if accept else p0.mask
+
+
+def ours_search(predictor, image, init_box, rng, cfg):
+    """Ablation: the free consistency-driven prompt-space search (over-optimizes Q)."""
+    return refine_search(predictor, image, init_box, build_objective(cfg), cfg, rng).mask
+
+
+# `ours` is the gate; the free search is kept for the ablation that explains its failure.
+ours = consistency_gate
 
 # Methods that use the SAM predictor vs the MedSAM predictor.
 SAM_METHODS = {
     "vanilla_sam": vanilla_sam,
     "ungated_cascade": ungated_cascade,
     "predicted_iou_gate": predicted_iou_gate,
-    "ours": ours,
+    "ours": consistency_gate,
 }
 MEDSAM_METHODS = {"medsam": medsam}
