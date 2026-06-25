@@ -42,9 +42,15 @@ TAU_Q = [0.50, 0.60, 0.70, 0.80]
 TAU_D = [0.00, 0.02, 0.05, 0.10]
 MIOU_GRID = [0.50, 0.60, 0.70]
 AREA_GRID = [(0.5, 2.0), (0.67, 1.5), (0.75, 1.33)]
+# Gate I — large-correction override on top of the predicted-IoU gate (final rescue).
+R_GRID = [2.0, 3.0, 4.0, 5.0]
+TAUD_I = [0.05, 0.10, 0.15, 0.20]
+TAUS_I = [-0.05, -0.02, 0.00]
+TAUBAD_I = [-0.08, -0.05, -0.02]
+RBAD_I = [1.5, 2.0, 2.5]
 VAL_FRACTION = 40           # percent of patients held out for threshold selection
 REG_BUDGET = 0.015          # max allowed delta=0 Dice regression vs vanilla (validation)
-GATES = ["A", "B", "C", "D", "E", "F", "G", "H"]
+GATES = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
 METHODS = ["vanilla", "medsam", "ungated", "predicted_iou_gate", "search", "ours", "oracle"]
 
 
@@ -126,6 +132,12 @@ def gate_refine(name, df, p):
         r = (s > p["tau_s"]) | (dq > p["tau_d"])
     elif name == "H":
         r = (s > p["tau_s"]) | ((q0 < p["tau_q"]) & (dq > p["tau_d"]))
+    elif name == "I":
+        ar = df.anchor_area_ratio.values
+        base = (df.score1 > df.score0).values                                  # predicted-IoU gate
+        override = (ar >= p["R"]) & (dq >= p["tau_d"]) & (s >= p["tau_s"])      # force refine: large correction
+        veto = (s <= p["tau_bad"]) & (ar <= p["R_bad"])                         # force keep: small worsening
+        r = (base | override) & ~veto
     else:
         raise ValueError(name)
     return np.asarray(r, dtype=bool)
@@ -149,6 +161,9 @@ def gate_grid(name, anchors):
         return [{"tau_s": s, "tau_d": d} for s in TAU_S for d in TAU_D]
     if name == "H":
         return [{"tau_s": s, "tau_q": q, "tau_d": d} for s in TAU_S for q in TAU_Q for d in TAU_D]
+    if name == "I":
+        return [{"R": R, "tau_d": td, "tau_s": ts, "tau_bad": tb, "R_bad": rb}
+                for R in R_GRID for td in TAUD_I for ts in TAUS_I for tb in TAUBAD_I for rb in RBAD_I]
     raise ValueError(name)
 
 
@@ -305,6 +320,79 @@ def pareto_plot(summary, out):
     plt.close(fig)
 
 
+def _grid_matrix(test, refine, kind):
+    md = method_dices(test, refine)
+    dsets = list(dict.fromkeys(test.dataset))
+    noises = sorted(test.noise.unique())
+    M = np.full((len(dsets), len(noises)), np.nan)
+    for i, d in enumerate(dsets):
+        for j, n in enumerate(noises):
+            mask = ((test.dataset == d) & (test.noise == n)).values
+            if mask.sum() == 0:
+                continue
+            M[i, j] = ((md["oracle"][mask] - md["ours"][mask]).mean() if kind == "loss"
+                       else refine[mask].mean())
+    return M, dsets, noises
+
+
+def fig_oracle_ceiling(test, refine, out):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    md = method_dices(test, refine)
+    series = {"vanilla": "#E74C3C", "ungated": "#9B59B6", "predicted_iou_gate": "#2ECC71",
+              "ours": "#3498DB", "oracle": "#000000"}
+    dsets = list(dict.fromkeys(test.dataset))
+    fig, axes = plt.subplots(1, len(dsets), figsize=(4 * len(dsets), 3.8), squeeze=False)
+    for i, d in enumerate(dsets):
+        ax = axes[0][i]
+        noises = sorted(test[test.dataset == d].noise.unique())
+        for m, c in series.items():
+            ys = [md[m][((test.dataset == d) & (test.noise == n)).values].mean() for n in noises]
+            ax.plot(noises, ys, marker="o", color=c, label=m, lw=2,
+                    ls="--" if m == "oracle" else "-")
+        ax.set_title(d, fontweight="bold")
+        ax.set_xlabel("box noise (px)")
+        ax.set_ylabel("Dice")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
+    fig.suptitle("Oracle keep/refine ceiling vs methods", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(Path(out) / "fig_oracle_ceiling.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _heatmap(M, rows, cols, title, fname, out, cmap):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(1.1 * len(cols) + 2.5, 0.7 * len(rows) + 2))
+    im = ax.imshow(M, cmap=cmap, aspect="auto")
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels([f"δ={c}" for c in cols])
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(rows)
+    for i in range(len(rows)):
+        for j in range(len(cols)):
+            if not np.isnan(M[i, j]):
+                ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", color="w", fontsize=9)
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(Path(out) / fname, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def final_figures(test, refine, out):
+    fig_oracle_ceiling(test, refine, out)
+    lossM, rows, cols = _grid_matrix(test, refine, "loss")
+    _heatmap(lossM, rows, cols, "Loss to oracle (Dice)", "fig_loss_to_oracle_heatmap.png", out, "magma")
+    refM, rows, cols = _grid_matrix(test, refine, "refine")
+    _heatmap(refM, rows, cols, "Refine rate", "fig_decision_rate_heatmap.png", out, "viridis")
+
+
 # ── stages ───────────────────────────────────────────────────────────────
 def _records_path(cfg):
     return _common.out_dir(cfg, "clean_veto") / "records.csv"
@@ -350,57 +438,75 @@ def run_analyze(cfg, args):
     summ = pd.DataFrame(summary)
     summ.drop(columns=["selected"]).to_csv(out / "gate_summary.csv", index=False)
 
-    # 2) recommended gate: best test Dice among feasible learnable gates
-    learn = summ[summ.gate.isin(GATES)]
-    feas = learn[learn.d0_regression <= REG_BUDGET]
-    rec = (feas if len(feas) else learn).sort_values("overall_dice", ascending=False).iloc[0]
-    rec_params = dict(summary[GATES.index(rec.gate)]["selected"])
-    (out / "selected_best.json").write_text(json.dumps({"gate": rec.gate, "params": rec_params}))
+    for g in GATES:
+        sweeps[g].to_csv(out / f"sweep_{g}.csv", index=False)
+    pareto_plot(summ, out)
 
-    # 3) per-recommended-gate tables + diagnosis + pareto
-    rr = refines[rec.gate]
+    # 2) FINAL "ours" = gate I (the large-correction override rescue experiment)
+    best_I = dict(summary[GATES.index("I")]["selected"])
+    rr = refines["I"]
+    (out / "selected_best.json").write_text(json.dumps({"gate": "I", "params": best_I}))
     final_table(test, rr).to_csv(out / "table1_test.csv", index=False)
     decision_rate_table(test, rr).to_csv(out / "oracle_decision_rates.csv", index=False)
     loss_to_oracle_table(test, rr).to_csv(out / "loss_to_oracle.csv", index=False)
-    for g in GATES:
-        sweeps[g].to_csv(out / f"sweep_{g}.csv", index=False)
     diag, auc = promise_diagnosis(test)
     diag.to_csv(out / "promise12_diagnosis.csv", index=False)
     auc.to_csv(out / "promise12_signal_auc.csv", index=False)
-    pareto_plot(summ, out)
+    final_figures(test, rr, out)
 
-    # 4) print
-    pd.set_option("display.width", 200)
+    mI = summ[summ.gate == "I"].iloc[0]
+    g_dice = float(summ.loc[summ.gate == "pred_iou_gate", "overall_dice"].iloc[0])
+    g_loss = float(summ.loc[summ.gate == "pred_iou_gate", "loss_to_oracle"].iloc[0])
+    pro = test[(test.dataset == "PROMISE12") & test.noise.isin([20, 30])].reset_index(drop=True)
+    if len(pro):
+        mdp = method_dices(pro, gate_refine("I", pro, best_I))
+        p_ours, p_gate = float(mdp["ours"].mean()), float(mdp["predicted_iou_gate"].mean())
+    else:
+        p_ours = p_gate = float("nan")
+
+    # 3) print
+    pd.set_option("display.width", 220)
     print(f"\nval/test split {VAL_FRACTION}/{100-VAL_FRACTION} by patient; thresholds selected on VAL only "
           f"(max val Dice s.t. δ=0 regression ≤ {REG_BUDGET}).")
-    print("\n=== GATE SUMMARY (test) — A–H + references ===")
+    print("\n=== GATE SUMMARY (test) — A–I + references ===")
     print(summ.drop(columns=["selected"]).round(4).to_string(index=False))
-    print(f"\nRECOMMENDED GATE: {rec.gate}  ({_p2s(rec_params)})  "
-          f"[feasible={bool(rec.feasible)}]")
-    print("\n=== FINAL Table 1 — recommended gate, TEST (Dice mean ± 95% CI) ===")
+    print(f"\nGATE I (override) selected: {_p2s(best_I)}  [feasible_on_val={bool(mI.feasible)}]")
+    print("\n=== FINAL Table 1 — gate I, TEST (Dice mean ± 95% CI) ===")
     print(final_table(test, rr).to_string(index=False))
+    print("\n=== Loss-to-oracle / gains — gate I (TEST) ===")
+    print(loss_to_oracle_table(test, rr).round(3).to_string(index=False))
+    print("\n=== Decision rates / oracle agreement — gate I (TEST) ===")
+    print(decision_rate_table(test, rr).round(3).to_string(index=False))
     print("\n=== PROMISE12 diagnosis: help vs hurt group signal means ===")
     print(diag.round(3).to_string(index=False))
-    print("\n  signal separability (AUC for predicting 'refinement helps', PROMISE12):")
+    print("  signal separability (AUC for 'refinement helps', PROMISE12):")
     print(auc.round(3).to_string(index=False))
+    print(f"\n  PROMISE12 δ∈{{20,30}}:  gate I = {p_ours:.3f}   predicted-IoU gate = {p_gate:.3f}   "
+          f"(Δ = {p_ours - p_gate:+.3f})")
 
-    print("\n" + "=" * 74)
-    gate_dice = float(summ.loc[summ.gate == "pred_iou_gate", "overall_dice"].iloc[0])
-    gate_loss = float(summ.loc[summ.gate == "pred_iou_gate", "loss_to_oracle"].iloc[0])
-    crit_A = (rec.overall_dice >= gate_dice - 1e-6) and (rec.d0_regression <= REG_BUDGET)
-    crit_B = (rec.loss_to_oracle < gate_loss - 0.005) and (rec.d0_regression <= REG_BUDGET)
-    if crit_A or crit_B:
-        print("CLAIM SUPPORTED: gate", rec.gate,
-              f"matches/beats predicted-IoU gate (Dice {rec.overall_dice:.3f} vs {gate_dice:.3f}, "
-              f"loss-to-oracle {rec.loss_to_oracle:.3f} vs {gate_loss:.3f}) with δ=0 reg "
-              f"{rec.d0_regression:+.3f}.")
-        print('Candidate title: "When Should SAM Refine? Reference-Free Clean-Prompt Veto ..."')
+    # 4) adopt/stop decision (exactly the user's criterion)
+    beats_dice = mI.overall_dice >= g_dice - 1e-9
+    reduces_loss = mI.loss_to_oracle < g_loss - 1e-9
+    d0_ok = mI.d0_regression <= REG_BUDGET
+    print("\n" + "=" * 78)
+    print("FINAL RESCUE VERDICT (gate I vs predicted-IoU gate):")
+    print(f"  overall Dice : {mI.overall_dice:.3f} vs {g_dice:.3f}   beats={beats_dice}")
+    print(f"  loss→oracle  : {mI.loss_to_oracle:.3f} vs {g_loss:.3f}   reduces={reduces_loss}")
+    print(f"  δ=0 regression vs vanilla: {mI.d0_regression:+.3f}   within budget={d0_ok}")
+    print(f"  δ≥20 gap vs ungated: {mI.hi_gap_vs_ungated:+.3f}")
+    if beats_dice and reduces_loss and d0_ok:
+        print("-> ADOPT gate I as final `ours`. Method-dominance claim holds.")
+        print('   Title: "When Should SAM Refine? ... Reference-Free Large-Correction Override"')
     else:
-        print("CLAIM NOT SUPPORTED by either criterion. Recommend reframing as:")
-        print('  "When Should SAM Refine? A Prompt Noise Gap Study of Test-Time Self-Refinement')
-        print('   in Medical Segmentation" — with oracle keep/refine as the central analysis.')
-    print("=" * 74)
-    print(f"\nAll tables + pareto_gates.png written to {out}")
+        print("-> STOP TUNING. The rescue did not clear the bar; make this an ANALYSIS paper:")
+        print('   Title: "When Should SAM Refine? A Prompt Noise Gap Study of Test-Time')
+        print('           Self-Refinement in Medical Segmentation"')
+        print("   Claim: unconditional refinement helps noisy prompts but regresses clean ones;")
+        print("          reference-free gates partially recover the oracle keep/refine decision,")
+        print("          but stability-only objectives Goodhart into stable wrong masks; we")
+        print("          benchmark the tradeoff and expose the remaining gap to oracle.")
+    print("=" * 78)
+    print(f"\nAll tables + figures (oracle ceiling, loss/decision heatmaps, pareto) written to {out}")
 
 
 def run_qualitative(cfg, args):
@@ -412,9 +518,10 @@ def run_qualitative(cfg, args):
     df = assign_split(pd.read_csv(_records_path(cfg))).reset_index(drop=True)
     sel_path = out / "selected_best.json"
     if args.gate:
-        gate, params = args.gate, {}   # uses default mid-grid thresholds below
         anchors = (MIOU_GRID[0], *AREA_GRID[0], 0.2 * int(cfg.img_size))
-        params = {"tau_s": 0.0, "tau_q": 0.7, "tau_d": 0.05, "anchors": list(anchors)}
+        gate = args.gate
+        params = {"tau_s": 0.0, "tau_q": 0.7, "tau_d": 0.05, "anchors": list(anchors),
+                  "R": 3.0, "tau_bad": -0.05, "R_bad": 2.0}   # mid-grid defaults for any gate
     elif sel_path.exists():
         sel = json.loads(sel_path.read_text())
         gate, params = sel["gate"], sel["params"]
