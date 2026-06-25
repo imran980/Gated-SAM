@@ -21,6 +21,7 @@ from ..baselines import MEDSAM_METHODS, SAM_METHODS
 from ..data import load_dataset
 from ..metrics import dice, hd95
 from ..prompts import add_box_noise
+from ..seeding import stable_rng
 from ..stats import fmt_ci, mean_ci, wilcoxon
 from . import _common
 
@@ -35,7 +36,7 @@ METHOD_STYLE = {
 
 
 def _seed_rng(name, noise, seed, tag=""):
-    return np.random.default_rng((hash(f"{name}|{noise}|{seed}|{tag}")) % (2**32))
+    return stable_rng(name, noise, seed, tag)
 
 
 def run_grid(sam, medsam, samples, cfg, dataset):

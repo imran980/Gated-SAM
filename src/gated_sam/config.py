@@ -1,6 +1,7 @@
 """Configuration loading. A thin wrapper over a YAML file with dotted-key overrides."""
 from __future__ import annotations
 
+import ast
 import copy
 from pathlib import Path
 from typing import Any
@@ -36,18 +37,21 @@ class Config(dict):
 
 
 def _coerce(value: str) -> Any:
-    """Best-effort string -> python for CLI overrides (10 -> int, true -> bool, ...)."""
+    """Best-effort string -> python for CLI overrides.
+
+    Handles ints/floats (10), bools (true/false), null, and literal lists/tuples/dicts
+    (`[0,1]`, `[0,10,20,30]`) via ast.literal_eval; anything else (paths, vit_h, file
+    names) is left as a string.
+    """
     low = value.lower()
     if low in ("true", "false"):
         return low == "true"
     if low in ("none", "null"):
         return None
-    for cast in (int, float):
-        try:
-            return cast(value)
-        except ValueError:
-            continue
-    return value
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return value
 
 
 def load_config(path: str | Path | None = None, overrides: list[str] | None = None) -> Config:

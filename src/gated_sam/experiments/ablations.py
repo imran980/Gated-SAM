@@ -20,6 +20,7 @@ from ..baselines import ours
 from ..data import load_dataset
 from ..metrics import dice
 from ..prompts import add_box_noise
+from ..seeding import stable_rng
 from ..stats import mean_ci
 from . import _common
 
@@ -50,7 +51,7 @@ def run_variant(sam, samples, cfg, dataset, noise):
         sam.set_image(s.image)
         h, w = s.image.shape[:2]
         for seed in cfg.seeds:
-            rng = np.random.default_rng((hash(s.name) ^ (noise << 8) ^ seed) % (2**32))
+            rng = stable_rng(s.name, noise, seed)
             box = add_box_noise(s.gt_box, int(noise), h, w, rng)
             scores.append(dice(ours(sam, s.image, box, rng, cfg), s.gt_mask))
     return scores

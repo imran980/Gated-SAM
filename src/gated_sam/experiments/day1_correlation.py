@@ -22,6 +22,7 @@ from ..data import load_dataset
 from ..metrics import dice
 from ..objectives import all_signal_objectives
 from ..prompts import add_box_noise
+from ..seeding import stable_rng
 from . import _common
 
 SIGNALS = ["predicted_iou", "coarse_agreement", "perturbation_consistency"]
@@ -37,7 +38,7 @@ def collect_signals(predictor, samples, cfg, dataset_name):
         for noise in cfg.noise_levels:
             seeds = cfg.seeds if noise > 0 else [cfg.seeds[0]]   # noise=0 is seed-invariant
             for seed in seeds:
-                rng = np.random.default_rng((hash(s.name) ^ (noise << 8) ^ seed) % (2**32))
+                rng = stable_rng(s.name, noise, seed)
                 box = add_box_noise(s.gt_box, int(noise), h, w, rng)
                 pred = predictor.predict_best(box)
                 row = {

@@ -20,6 +20,7 @@ from ..metrics import dice
 from ..objectives import build_objective
 from ..prompts import add_box_noise
 from ..refine import refine_search
+from ..seeding import stable_rng
 from . import _common
 
 RECOVER_MARGIN = 0.05    # final must beat init by this to count as "recovered"
@@ -32,7 +33,7 @@ def analyze(sam, samples, cfg, dataset, noise):
     for s in tqdm(samples, desc=f"lockin:{dataset}"):
         sam.set_image(s.image)
         h, w = s.image.shape[:2]
-        rng = np.random.default_rng((hash(s.name) ^ (noise << 8)) % (2**32))
+        rng = stable_rng(s.name, noise)
         box = add_box_noise(s.gt_box, int(noise), h, w, rng)
 
         res = refine_search(sam, s.image, box, obj, cfg, rng)
