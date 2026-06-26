@@ -213,6 +213,7 @@ def metrics_from_refine(df, name, refine, params=None):
     md = method_dices(df, refine)
     d0 = (df.noise == 0).values
     hi = df.noise.isin([20, 30]).values
+    oracle_refine = (df.dice_refined > df.dice_vanilla).values
     return dict(
         gate=name, params=_p2s(params),
         overall_dice=float(md["ours"].mean()),
@@ -221,7 +222,54 @@ def metrics_from_refine(df, name, refine, params=None):
         loss_to_oracle=float((md["oracle"] - md["ours"]).mean()),
         gain_vs_predIoU=float((md["ours"] - md["predicted_iou_gate"]).mean()),
         refine_rate=float(refine.mean()),
+        oracle_agreement=float((refine == oracle_refine).mean()),
     )
+
+
+def per_dataset_summary(test, refine):
+    """Gate-I metrics broken down by dataset (BUSI/JSRT/Kvasir/PROMISE12)."""
+    md = method_dices(test, refine)
+    oracle_refine = (test.dice_refined > test.dice_vanilla).values
+    rows = []
+    for d in dict.fromkeys(test.dataset):
+        m = (test.dataset == d).values
+        d0 = m & (test.noise == 0).values
+        hi = m & test.noise.isin([20, 30]).values
+        rows.append(dict(
+            dataset=d, n=int(m.sum()),
+            overall_dice=md["ours"][m].mean(),
+            d0_regression=(md["vanilla"][d0] - md["ours"][d0]).mean() if d0.any() else np.nan,
+            hi_gap_vs_ungated=(md["ours"][hi] - md["ungated"][hi]).mean() if hi.any() else np.nan,
+            loss_to_oracle=(md["oracle"][m] - md["ours"][m]).mean(),
+            gain_vs_gate=(md["ours"][m] - md["predicted_iou_gate"][m]).mean(),
+            refine_rate=refine[m].mean(),
+            oracle_agreement=(refine[m] == oracle_refine[m]).mean()))
+    return pd.DataFrame(rows)
+
+
+def promise_breakdown(test, refine):
+    """PROMISE12-specific metrics + keep/refine decision counts vs the oracle."""
+    m = (test.dataset == "PROMISE12").values
+    if m.sum() == 0:
+        return None
+    md = method_dices(test, refine)
+    oref = (test.dice_refined > test.dice_vanilla).values
+    noise = test.noise.values
+    d0 = m & (noise == 0)
+    hi = m & np.isin(noise, [20, 30])
+    metrics = dict(
+        d0_regression_vs_vanilla=float((md["vanilla"][d0] - md["ours"][d0]).mean()) if d0.any() else np.nan,
+        hi_gain_vs_vanilla=float((md["ours"][hi] - md["vanilla"][hi]).mean()) if hi.any() else np.nan,
+        hi_gap_vs_ungated=float((md["ours"][hi] - md["ungated"][hi]).mean()) if hi.any() else np.nan,
+        loss_to_oracle=float((md["oracle"][m] - md["ours"][m]).mean()),
+    )
+    counts = dict(
+        clean_correctly_vetoed=int((d0 & ~refine & ~oref).sum()),
+        noisy_correctly_refined=int((hi & refine & oref).sum()),
+        clean_wrongly_refined=int((d0 & refine & ~oref).sum()),
+        noisy_wrongly_vetoed=int((hi & ~refine & oref).sum()),
+    )
+    return metrics, counts
 
 
 # ── reporting tables (TEST split) ────────────────────────────────────────
@@ -452,6 +500,9 @@ def run_analyze(cfg, args):
     diag, auc = promise_diagnosis(test)
     diag.to_csv(out / "promise12_diagnosis.csv", index=False)
     auc.to_csv(out / "promise12_signal_auc.csv", index=False)
+    per_ds = per_dataset_summary(test, rr)
+    per_ds.to_csv(out / "per_dataset_breakdown.csv", index=False)
+    pro_break = promise_breakdown(test, rr)
     final_figures(test, rr, out)
 
     mI = summ[summ.gate == "I"].iloc[0]
@@ -477,6 +528,13 @@ def run_analyze(cfg, args):
     print(loss_to_oracle_table(test, rr).round(3).to_string(index=False))
     print("\n=== Decision rates / oracle agreement — gate I (TEST) ===")
     print(decision_rate_table(test, rr).round(3).to_string(index=False))
+    print("\n=== PER-DATASET breakdown — gate I (TEST) ===")
+    print(per_ds.round(3).to_string(index=False))
+    if pro_break is not None:
+        pm, pc = pro_break
+        print("\n=== PROMISE12-specific breakdown — gate I (TEST) ===")
+        print("  " + "  ".join(f"{k}={v:+.3f}" for k, v in pm.items()))
+        print("  decision counts vs oracle:  " + "  ".join(f"{k}={v}" for k, v in pc.items()))
     print("\n=== PROMISE12 diagnosis: help vs hurt group signal means ===")
     print(diag.round(3).to_string(index=False))
     print("  signal separability (AUC for 'refinement helps', PROMISE12):")
