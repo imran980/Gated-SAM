@@ -532,6 +532,14 @@ def run_qualitative(cfg, args):
     out, base_p, cand_p = _paths(cfg)
     base, cand = pd.read_csv(base_p), pd.read_csv(cand_p)
     cfg_file = (out / f"selected_{args.gate}.json") if getattr(args, "gate", None) else (out / "final_config.json")
+    if not cfg_file.exists():
+        fallback = out / "final_config.json"
+        if getattr(args, "gate", None) and fallback.exists():
+            print(f"[qual] {cfg_file.name} not found — re-run `--stage analyze` to write per-gate "
+                  f"configs. Falling back to {fallback.name} for now.")
+            cfg_file = fallback
+        else:
+            raise SystemExit(f"{cfg_file} not found. Run `--stage analyze` first (offline, no re-cache).")
     final = json.loads(cfg_file.read_text())
     print(f"[qual] using {cfg_file.name}: gate {final['gate']} pad={final['pad']} λ1={final['l1']} λ2={final['l2']}")
     pad, l1, l2 = final["pad"], final["l1"], final["l2"]
