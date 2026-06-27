@@ -407,6 +407,11 @@ def run_analyze(cfg, args):
     figures(test, refine, d, i, summ, out)
     (out / "final_config.json").write_text(json.dumps({"gate": final_name, **{k: final_cfg[k]
                                           for k in ("pad", "l1", "l2", "params")}}, default=str))
+    # also persist each gate's val-selected config so qualitative can target a specific gate
+    for label, cfgb in [("I", best["I"]), ("J", best["J"]), ("K", best["K"]), ("I_old", best_I_old)]:
+        if cfgb is not None:
+            (out / f"selected_{label}.json").write_text(json.dumps(
+                {"gate": cfgb["gate"], **{k: cfgb[k] for k in ("pad", "l1", "l2", "params")}}, default=str))
 
     # print
     pd.set_option("display.width", 220)
@@ -445,17 +450,179 @@ def run_analyze(cfg, args):
     print(f"\nAll tables + figures written to {out}")
 
 
+# ── qualitative Figure 2 ─────────────────────────────────────────────────
+ROW_SPECS = [
+    # (key, label, noise_filter, want_refine, gap = winner - loser, min_gap)
+    ("clean_correctly_vetoed", "(a) Clean prompt: refinement correctly vetoed",
+     "clean", False, ("dice_vanilla", "dice_refined"), 0.03),
+    ("noisy_correctly_refined", "(b) Noisy prompt: refinement correctly accepted",
+     "noisy", True, ("dice_refined", "dice_vanilla"), 0.10),
+    ("clean_wrongly_refined", "(c) Clean prompt: refinement wrongly accepted",
+     "clean", True, ("dice_vanilla", "dice_refined"), 0.05),
+    ("noisy_wrongly_vetoed", "(d) Noisy prompt: helpful refinement wrongly vetoed",
+     "noisy", False, ("dice_refined", "dice_vanilla"), 0.10),
+]
+_PREF = {"BUSI": 0, "Kvasir": 1, "PROMISE12": 2, "JSRT": 3}
+COLS = ["Input + BBoxes", "Ground Truth", "SAM / Vanilla", "Search", "Ours"]
+
+
+def _pick_row(f, noise_filter, want_refine, gap_cols, min_gap):
+    cond = (f.noise == 0) if noise_filter == "clean" else (f.noise >= 20)
+    sub = f[cond & (f.refine == want_refine)].copy()
+    if not len(sub):
+        return None, 0.0
+    sub["gap"] = sub[gap_cols[0]] - sub[gap_cols[1]]
+    used = min_gap
+    cand = sub[sub["gap"] >= min_gap]
+    if not len(cand):                       # relax once, then fall back to the largest gap
+        used = max(0.02, min_gap - 0.03)
+        cand = sub[sub["gap"] >= used]
+    if not len(cand):
+        cand, used = sub, 0.0
+    cand = cand.assign(pref=cand.dataset.map(lambda d: _PREF.get(d, 4)))
+    best = cand.sort_values(["pref", "gap"], ascending=[True, False]).iloc[0]
+    return best, used
+
+
+def _sel_channel(cand, row, pad, l1, l2):
+    s = cand[(cand.name == row["name"]) & (cand.noise == row.noise)
+             & (cand.seed == row.seed) & (cand["pad"] == pad)]
+    if not len(s):
+        return 0
+    areapen = np.log(np.clip(s.area_ratio.values, 1e-6, None)) ** 2
+    return int(s.channel.values[np.argmax(s.score.values + l1 * s.q_box.values - l2 * areapen)])
+
+
+def _reconstruct(sam, sample, row, cfg, pad, channel):
+    h, w = sample.image.shape[:2]
+    rng = stable_rng(sample.name, int(row.noise), int(row.seed))
+    nbox = clip_box(add_box_noise(sample.gt_box, int(row.noise), h, w, rng), h, w)
+    sam.set_image(sample.image)
+    p0 = sam.predict_best(nbox)
+    tight = mask_to_box(p0.mask, pad=0, shape=(h, w))
+    if tight is None:
+        m1 = p0.mask
+    else:
+        hint = p0.logits if bool(cfg.search.use_mask_hint) else None
+        preds = sam.predict_all(_expand(tight, pad, h, w), mask_input=hint)
+        m1 = preds[min(channel, len(preds) - 1)].mask
+    srch = refine_search(sam, sample.image, nbox, build_objective(cfg), cfg, rng).mask
+    ours = m1 if bool(row.refine) else p0.mask
+    return nbox, sample.gt_box, p0.mask, m1, srch, ours
+
+
+def _panel(ax, image, mask=None, gt_box=None, prompt_box=None, title="", color="#39FF14"):
+    import matplotlib.patches as patches
+    ax.imshow(image)
+    if mask is not None:
+        ax.imshow(np.ma.masked_where(~mask.astype(bool), mask), alpha=0.45, cmap="autumn")
+    for box, c in [(gt_box, "#00FF00"), (prompt_box, "#FF3030")]:
+        if box is not None:
+            x1, y1, x2, y2 = box
+            ax.add_patch(patches.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=c, lw=2))
+    ax.set_title(title, fontsize=9)
+    ax.axis("off")
+
+
+def run_qualitative(cfg, args):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out, base_p, cand_p = _paths(cfg)
+    base, cand = pd.read_csv(base_p), pd.read_csv(cand_p)
+    cfg_file = (out / f"selected_{args.gate}.json") if getattr(args, "gate", None) else (out / "final_config.json")
+    final = json.loads(cfg_file.read_text())
+    print(f"[qual] using {cfg_file.name}: gate {final['gate']} pad={final['pad']} λ1={final['l1']} λ2={final['l2']}")
+    pad, l1, l2 = final["pad"], final["l1"], final["l2"]
+    params = final["params"] if isinstance(final["params"], dict) else json.loads(final["params"].replace("'", '"'))
+    f = build_frame(base, cand, pad, l1, l2)
+    f["refine"] = gate(final["gate"], f, params)
+
+    samples = {n: {s.name: s for s in load_dataset(n, cfg)} for n in _common.dataset_names(cfg, args)}
+    sam = _common.build_sam(cfg)
+
+    rows, picks = [], {}
+    for key, label, nf, want, gap_cols, min_gap in ROW_SPECS:
+        row, used = _pick_row(f, nf, want, gap_cols, min_gap)
+        picks[key] = (row, label, used)
+        rows.append((key, label, row))
+
+    fig, axes = plt.subplots(len(ROW_SPECS), 5, figsize=(16, 3.2 * len(ROW_SPECS)), squeeze=False)
+    for r, (key, label, row) in enumerate(rows):
+        if row is None:
+            for c in range(5):
+                axes[r][c].axis("off")
+            axes[r][0].set_title(f"{label}\n(no qualifying example)", fontsize=9)
+            continue
+        s = samples.get(row.dataset, {}).get(row["name"])
+        if s is None:
+            for c in range(5):
+                axes[r][c].axis("off")
+            continue
+        nbox, gtbox, m0, m1, srch, ours = _reconstruct(sam, s, row, cfg, pad, _sel_channel(cand, row, pad, l1, l2))
+        d = lambda m: dice(m, s.gt_mask)
+        panels = [
+            (s.image, None, gtbox, nbox, "Input + BBoxes"),
+            (s.image, s.gt_mask, None, None, "Ground Truth"),
+            (s.image, m0, None, None, f"SAM / Vanilla  ({d(m0):.2f})"),
+            (s.image, srch, None, None, f"Search  ({d(srch):.2f})"),
+            (s.image, ours, None, None, f"Ours  ({d(ours):.2f}, {'refine' if row.refine else 'keep'})"),
+        ]
+        for c, (img, mask, gb, pb, title) in enumerate(panels):
+            _panel(axes[r][c], img, mask, gb, pb, title)
+        axes[r][0].set_ylabel(label, fontsize=10, rotation=0, ha="right", va="center")
+        # save individual row
+        rfig, raxes = plt.subplots(1, 5, figsize=(16, 3.4))
+        for c, (img, mask, gb, pb, title) in enumerate(panels):
+            _panel(raxes[c], img, mask, gb, pb, title)
+        rfig.suptitle(label, fontsize=11)
+        rfig.tight_layout()
+        rfig.savefig(out / f"{key}.png", dpi=150, bbox_inches="tight")
+        plt.close(rfig)
+
+    fig.suptitle("Qualitative keep-vs-refine behaviour.  Green box = ground-truth box, red box = (noisy) prompt.  "
+                 "Search denotes stability-based prompt search.", fontsize=10, y=1.005)
+    fig.tight_layout()
+    fig.savefig(out / "fig_qual_refine_preserve.png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+    # report the replaced clean-veto row + confirmation
+    row, label, used = picks["clean_correctly_vetoed"]
+    print("\n=== Replaced clean-veto row (panel a) ===")
+    if row is None:
+        print("  WARNING: no clean case with the gate keeping M0 was found.")
+    else:
+        s = samples.get(row.dataset, {}).get(row["name"])
+        print(f"  dataset      : {row.dataset}")
+        print(f"  sample id    : {row['name']}")
+        print(f"  noise (δ)    : {int(row.noise)}")
+        print(f"  Dice Vanilla/M0 : {row.dice_vanilla:.3f}")
+        print(f"  Dice Refined/M1 : {row.dice_refined:.3f}")
+        print(f"  Dice Search     : {row.dice_search:.3f}")
+        print(f"  Dice Ours       : {(row.dice_vanilla if not row.refine else row.dice_refined):.3f}")
+        print(f"  gate decision   : {'KEEP M0' if not row.refine else 'REFINE'}")
+        gap = row.dice_vanilla - row.dice_refined
+        ok = (int(row.noise) == 0) and (not bool(row.refine)) and (gap >= 0.03)
+        print(f"  confirm: clean(δ=0) & gate keeps M0 & Dice(M0)-Dice(M1)={gap:+.3f} ≥ 0.03  -> {'YES' if ok else 'NO (used gap≥%.2f)'%used}")
+    print(f"\nSaved fig_qual_refine_preserve.png + per-row PNGs to {out}")
+
+
 def main(argv=None):
     p = _common.base_parser(__doc__)
-    p.add_argument("--stage", choices=["cache", "analyze"], required=True)
+    p.add_argument("--stage", choices=["cache", "analyze", "qualitative"], required=True)
     p.add_argument("--postproc", action="store_true", help="apply CC+hole-fill to ALL methods")
     p.add_argument("--skip-search", action="store_true")
+    p.add_argument("--gate", choices=["I", "J", "K", "I_old"], default=None,
+                   help="qualitative: target a specific gate's config (default: final_ours)")
     args = p.parse_args(argv)
     cfg = _common.get_config(args)
     if args.stage == "cache":
         run_cache(cfg, args)
-    else:
+    elif args.stage == "analyze":
         run_analyze(cfg, args)
+    else:
+        run_qualitative(cfg, args)
 
 
 if __name__ == "__main__":
